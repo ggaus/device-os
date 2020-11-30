@@ -269,6 +269,8 @@ public:
         setIPAddressSource(DYNAMIC_IP);
     }
 
+    int getCredentials(WiFiAccessPoint* results, size_t result_count);
+
 #if !HAL_PLATFORM_NCP
     String hostname()
     {
