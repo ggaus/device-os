@@ -423,9 +423,11 @@ void PMIC::reset() {
 bool PMIC::enableCharging() {
     std::lock_guard<PMIC> l(*this);
     byte DATA = readRegister(POWERON_CONFIG_REGISTER);
-    DATA = DATA & 0b11001111;
-    DATA = DATA | 0b00010000;
-    writeRegister(POWERON_CONFIG_REGISTER, DATA);
+    if ((DATA & 0b00110000) != 0b00010000) {
+        DATA = DATA & 0b11001111;
+        DATA = DATA | 0b00010000;
+        writeRegister(POWERON_CONFIG_REGISTER, DATA);
+    }
     return 1;
 }
 
@@ -438,7 +440,9 @@ bool PMIC::enableCharging() {
 bool PMIC::disableCharging() {
     std::lock_guard<PMIC> l(*this);
     byte DATA = readRegister(POWERON_CONFIG_REGISTER);
-    writeRegister(POWERON_CONFIG_REGISTER, (DATA & 0b11001111));
+    if ((DATA & 0b00110000) != 0) {
+        writeRegister(POWERON_CONFIG_REGISTER, (DATA & 0b11001111));
+    }
     return 1;
 }
 

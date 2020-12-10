@@ -108,12 +108,13 @@ PowerManager* PowerManager::instance() {
 }
 
 void PowerManager::init() {
+  Serial1.begin(115200); // TODO delete me
   os_thread_t th = nullptr;
   os_thread_create(&th, "pwr", OS_THREAD_PRIORITY_CRITICAL, &PowerManager::loop, nullptr,
 #if defined(DEBUG_BUILD)
     4 * 1024);
 #else
-    1024);
+    4 * 1024); // TODO fix me
 #endif // defined(DEBUIG_BUILD)
   SPARK_ASSERT(th != nullptr);
 }
@@ -162,6 +163,16 @@ void PowerManager::wakeup() {
   }
 }
 
+void PowerManager::handleDisable() {
+  if ((config_.flags & HAL_POWER_CHARGE_STATE_DISABLE) == 0) {
+    return;
+  }
+
+  // The PMIC lock should already be acquired
+  PMIC power(false);
+  power.disableCharging();
+}
+
 void PowerManager::handleUpdate() {
   if (!update_) {
     return;
@@ -182,7 +193,14 @@ void PowerManager::handleUpdate() {
   // Watchdog fault or buck converter got disabled
   if ((curFault & 0x80) || !power.isBuckEnabled()) {
     // Restore parameters
+    Serial1.println("handleUpdate,watchdog"); // TODO delete me
     initDefault();
+  }
+  else {
+    if (power.readPowerONRegister() & 0b00110000) {
+      Serial1.println("handleUpdate,enabled?"); // TODO delete me
+    }
+    handleDisable();
   }
 
   const uint8_t status = power.getSystemStatus();
@@ -334,7 +352,9 @@ void PowerManager::loop(void* arg) {
     power.getFault();
     FuelGauge fuel(true);
     fuel.wakeup();
-    fuel.setAlertThreshold(20); // Low Battery alert at 10% (about 3.6V)
+    if ((self->config_.flags & HAL_POWER_CHARGE_STATE_DISABLE) == 0) {
+      fuel.setAlertThreshold(20); // Low Battery alert at 10% (about 3.6V)
+    }
     fuel.clearAlert(); // Ensure this is cleared, or interrupts will never occur
     LOG_DEBUG(INFO, "State of Charge: %-6.2f%%", fuel.getSoC());
     LOG_DEBUG(INFO, "Battery Voltage: %-4.2fV", fuel.getVCell());
@@ -353,6 +373,7 @@ void PowerManager::loop(void* arg) {
         // Do not re-run DPDM
         self->initDefault(false);
         self->update_ = true;
+        //Serial1.println("loop,reload"); // TODO delete me
       } else if (ev == Event::Wakeup) {
         self->initDefault();
         if (!self->fuelGaugeAwake_) {
@@ -361,10 +382,12 @@ void PowerManager::loop(void* arg) {
           self->fuelGaugeAwake_ = true;
           HAL_Delay_Milliseconds(500);
         }
+        //Serial1.println("loop,wakeup"); // TODO delete me
         self->handleUpdate();
       }
     }
     while (self->update_) {
+      //Serial1.println("loop,update"); // TODO delete me
       self->handleUpdate();
     }
     self->handlePossibleFaultLoop();
@@ -399,11 +422,16 @@ void PowerManager::initDefault(bool dpdm) {
   power.setChargeVoltage(config_.termination_voltage);
 
   // Set recharge threshold to default value - 100mV
-  power.setRechargeThreshold(100);
+  power.setRechargeThreshold(300); // TODO fix me
   power.setChargeCurrent(config_.charge_current);
 
   // Enable charging
-  power.enableCharging();
+  if ((config_.flags & HAL_POWER_CHARGE_STATE_DISABLE) == 0) {
+    power.enableCharging();
+  }
+  else {
+    handleDisable();
+  }
 
   // Just in case make sure to enable BATFET
   if (!power.isBATFETEnabled()) {
@@ -548,7 +576,7 @@ battery_state_t PowerManager::handlePossibleFault(battery_state_t from, battery_
           return BATTERY_STATE_DISCONNECTED;
         } else {
           PMIC power;
-          power.setRechargeThreshold(300);
+          power.setRechargeThreshold(300); // TODO fix me
           possibleFaultCounter_ = 0;
           faultSecondaryCounter_ = 1;
           possibleFaultTimestamp_ = millis();
@@ -562,7 +590,7 @@ battery_state_t PowerManager::handlePossibleFault(battery_state_t from, battery_
 void PowerManager::handlePossibleFaultLoop() {
   if (faultSecondaryCounter_ == 1 && (millis() - possibleFaultTimestamp_ > DEFAULT_FAULT_WINDOW)) {
       PMIC power;
-      power.setRechargeThreshold(100);
+      power.setRechargeThreshold(300); // TODO fix me
       faultSecondaryCounter_ = 0;
       faultSuppressed_ = millis();
   }
@@ -668,6 +696,7 @@ void PowerManager::deinit() {
 int PowerManager::setConfig(const hal_power_config* conf) {
   int ret = hal_power_store_config(conf, nullptr);
   if (isRunning()) {
+    Serial1.println("setConfig,running"); // TODO delete me
     // Power manager is already running, ask it to reload the config
     Event ev = Event::ReloadConfig;
     os_queue_put(queue_, (const void*)&ev, CONCURRENT_WAIT_FOREVER, nullptr);

@@ -42,6 +42,7 @@ private:
   static void isrHandler();
   static void usbStateChangeHandler(HAL_USB_State state, void* context);
   void update();
+  void handleDisable();
   void handleUpdate();
   void initDefault(bool dpdm = true);
   void handleStateChange(battery_state_t from, battery_state_t to, bool low);
