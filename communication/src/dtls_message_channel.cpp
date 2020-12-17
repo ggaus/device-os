@@ -17,6 +17,8 @@
  ******************************************************************************
  */
 
+#undef LOG_COMPILE_TIME_LEVEL
+
 #include "logging.h"
 
 LOG_SOURCE_CATEGORY("comm.dtls")
@@ -38,6 +40,48 @@ LOG_SOURCE_CATEGORY("comm.dtls")
 
 namespace particle { namespace protocol {
 
+namespace {
+
+// FIXME
+void updateOutPointers( mbedtls_ssl_context *ssl,
+                                      mbedtls_ssl_transform *transform )
+{
+#if defined(MBEDTLS_SSL_PROTO_DTLS)
+    if( ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM )
+    {
+        ssl->out_ctr = ssl->out_hdr +  3;
+#if defined(MBEDTLS_SSL_DTLS_CONNECTION_ID)
+        ssl->out_cid = ssl->out_ctr +  8;
+        ssl->out_len = ssl->out_cid;
+        if( transform != NULL )
+            ssl->out_len += transform->out_cid_len;
+#else /* MBEDTLS_SSL_DTLS_CONNECTION_ID */
+        ssl->out_len = ssl->out_ctr + 8;
+#endif /* MBEDTLS_SSL_DTLS_CONNECTION_ID */
+        ssl->out_iv  = ssl->out_len + 2;
+    }
+    else
+#endif
+    {
+        ssl->out_ctr = ssl->out_hdr - 8;
+        ssl->out_len = ssl->out_hdr + 3;
+#if defined(MBEDTLS_SSL_DTLS_CONNECTION_ID)
+        ssl->out_cid = ssl->out_len;
+#endif
+        ssl->out_iv  = ssl->out_hdr + 5;
+    }
+
+    /* Adjust out_msg to make space for explicit IV, if used. */
+    if( transform != NULL &&
+        ssl->minor_ver >= MBEDTLS_SSL_MINOR_VERSION_2 )
+    {
+        ssl->out_msg = ssl->out_iv + transform->ivlen - transform->fixed_ivlen;
+    }
+    else
+        ssl->out_msg = ssl->out_iv;
+}
+
+} // namespace
 
 uint32_t compute_checksum(uint32_t(*calculate_crc)(const uint8_t* data, uint32_t len), const uint8_t* server, size_t server_len, const uint8_t* device, size_t device_len)
 {
@@ -61,6 +105,7 @@ bool SessionPersist::prepare_save(const uint8_t* random, uint32_t keys_checksum,
 	int cidEnabled = MBEDTLS_SSL_CID_DISABLED;
 	int r = mbedtls_ssl_get_peer_cid(context, &cidEnabled, cid, &cidSize);
 	if (r != 0 || cidEnabled != MBEDTLS_SSL_CID_ENABLED || cidSize != DTLS_CID_SIZE) {
+		LOG(ERROR, "Unable to get connection ID");
 		return false;
 	}
 	memcpy(this->cid, cid, DTLS_CID_SIZE);
@@ -73,6 +118,7 @@ bool SessionPersist::prepare_save(const uint8_t* random, uint32_t keys_checksum,
 	this->next_coap_id = next_id;
 
 	save_session(context->session);
+	size = sizeof(*this);
 
 	return true;
 }
@@ -146,6 +192,12 @@ SessionPersist::RestoreStatus SessionPersist::restore(mbedtls_ssl_context* conte
 			return ERROR;
 		}
 
+#ifdef MBEDTLS_SSL_DTLS_CONNECTION_ID
+		context->transform_negotiate->out_cid_len = DTLS_CID_SIZE;
+		memcpy(context->transform_negotiate->out_cid, cid, DTLS_CID_SIZE);
+		updateOutPointers(context, context->transform_negotiate);
+#endif
+
 		context->in_msg = context->in_iv + context->transform_negotiate->ivlen -
 											context->transform_negotiate->fixed_ivlen;
 		context->out_msg = context->out_iv + context->transform_negotiate->ivlen -
@@ -157,10 +209,6 @@ SessionPersist::RestoreStatus SessionPersist::restore(mbedtls_ssl_context* conte
 		context->transform_in = context->transform_negotiate;
 		context->transform_out = context->transform_negotiate;
 
-#ifdef MBEDTLS_SSL_DTLS_CONNECTION_ID
-		context->transform_out->out_cid_len = DTLS_CID_SIZE;
-		memcpy(context->transform_out->out_cid, cid, DTLS_CID_SIZE);
-#endif
 		mbedtls_ssl_handshake_wrapup(context);
 		size = sizeof(*this);
 		return COMPLETE;
@@ -438,15 +486,15 @@ ProtocolError DTLSMessageChannel::establish()
 	{
 		LOG(ERROR,"handshake failed -%x", -ret);
 		reset_session();
+		return IO_ERROR_GENERIC_ESTABLISH;
 	}
-	else
+
+	if (!sessionPersist.prepare_save(random, keys_checksum, &ssl_context, 0))
 	{
-		if (!sessionPersist.prepare_save(random, keys_checksum, &ssl_context, 0))
-		{
-			sessionPersist.clear(callbacks.save);
-		}
+		sessionPersist.clear(callbacks.save);
 	}
-	return ret==0 ? NO_ERROR : IO_ERROR_GENERIC_ESTABLISH;
+
+	return NO_ERROR;
 }
 
 ProtocolError DTLSMessageChannel::notify_established()
