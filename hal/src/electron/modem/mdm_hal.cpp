@@ -1682,57 +1682,19 @@ int MDMParser::network_debug() {
 }
 
 int MDMParser::interveneRegistration(system_tick_t start) {
-    auto timeout = (registrationInterventions_ + 1) * REGISTRATION_INTERVENTION_TIMEOUT;
-    // TODO: Check that it's not registered in this gap?
-    if (HAL_Timer_Get_Milli_Seconds() - start >= timeout) {
-        if (_dev.dev != DEV_SARA_R410) {
-            if (!REG_OK(_net.csd)) {
-                if (_net.csd == REG_NOTREG) {
-                    registrationInterventions_++;
-                    sendFormated("AT+COPS=0,2\r\n");
-                    if (WAIT == waitFinalResp(nullptr, nullptr, COPS_TIMEOUT)) {
-                        return -1;
-                    }
-                } else if (_net.csd == REG_DENIED && _net.csd == _net.psd) {
-                    registrationInterventions_++;
-                    sendFormated("AT+CFUN=0\r\n");
-                    if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
-                        return -1;
-                    }
-                    sendFormated("AT+CFUN=1\r\n");
-                    if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
-                        return -1;
-                    }
-                }
-            }
-            if (REG_OK(_net.csd) && !REG_OK(_net.psd)) {
-                if (_net.psd == REG_NOTREG) {
-                    registrationInterventions_++;
-                    sendFormated("AT+CGACT?\r\n");
-                    if (WAIT == waitFinalResp()) {
-                        return -1;
-                    }
-                    sendFormated("AT+CGACT=1\r\n");
-                    auto resp_cgact = waitFinalResp(nullptr, nullptr, 3*60*1000);
-                    if (WAIT == resp_cgact) {
-                        return -1;
-                    } else if (RESP_OK != resp_cgact) {
-                        sendFormated("AT+COPS=0,2\r\n");
-                        if (WAIT == waitFinalResp(nullptr, nullptr, COPS_TIMEOUT)) {
-                            return -1;
-                        }
-                    }
-                }
-            }
-        } else {
-            if (_net.eps == REG_NOTREG) {
+    MDM_INFO("Intervening registration after %lu sec", (HAL_Timer_Get_Milli_Seconds() - start)/1000);
+    if (_dev.dev != DEV_SARA_R410) {
+        if (!REG_OK(_net.csd)) {
+            if (_net.csd == REG_NOTREG) {
+                MDM_INFO("Sticky not registering CSD state for %lu s, PLMN reselection", (HAL_Timer_Get_Milli_Seconds() - start) / 1000);
                 registrationInterventions_++;
                 sendFormated("AT+COPS=0,2\r\n");
                 if (WAIT == waitFinalResp(nullptr, nullptr, COPS_TIMEOUT)) {
                     return -1;
                 }
-            } else if (_net.eps == REG_DENIED) {
+            } else if (_net.csd == REG_DENIED && _net.csd == _net.psd) {
                 registrationInterventions_++;
+                MDM_INFO("Sticky CSD and PSD denied state for %lu s, RF reset", (HAL_Timer_Get_Milli_Seconds() - start) / 1000);
                 sendFormated("AT+CFUN=0\r\n");
                 if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
                     return -1;
@@ -1741,6 +1703,47 @@ int MDMParser::interveneRegistration(system_tick_t start) {
                 if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
                     return -1;
                 }
+            }
+        }
+        if (REG_OK(_net.csd) && !REG_OK(_net.psd)) {
+            if (_net.psd == REG_NOTREG) {
+                registrationInterventions_++;
+                sendFormated("AT+CGACT?\r\n");
+                MDM_INFO("Sticky not registering PSD state for %lu s, force GPRS attach", (HAL_Timer_Get_Milli_Seconds() - start) / 1000);
+                if (WAIT == waitFinalResp()) {
+                    return -1;
+                }
+                sendFormated("AT+CGACT=1\r\n");
+                auto resp_cgact = waitFinalResp(nullptr, nullptr, 3*60*1000);
+                if (WAIT == resp_cgact) {
+                    return -1;
+                } else if (RESP_OK != resp_cgact) {
+                    MDM_INFO("GPRS attach failed, try PLMN reselection");
+                    sendFormated("AT+COPS=0,2\r\n");
+                    if (WAIT == waitFinalResp(nullptr, nullptr, COPS_TIMEOUT)) {
+                        return -1;
+                    }
+                }
+            }
+        }
+    } else {
+        if (_net.eps == REG_NOTREG) {
+            registrationInterventions_++;
+            MDM_INFO("Sticky not registering EPS state for %lu s, PLMN reselection", (HAL_Timer_Get_Milli_Seconds() - start) / 1000);
+            sendFormated("AT+COPS=0,2\r\n");
+            if (WAIT == waitFinalResp(nullptr, nullptr, COPS_TIMEOUT)) {
+                return -1;
+            }
+        } else if (_net.eps == REG_DENIED) {
+            registrationInterventions_++;
+            MDM_INFO("Sticky EPS denied state for %lu s, RF reset", (HAL_Timer_Get_Milli_Seconds() - start) / 1000);
+            sendFormated("AT+CFUN=0\r\n");
+            if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
+                return -1;
+            }
+            sendFormated("AT+CFUN=1\r\n");
+            if (WAIT == waitFinalResp(nullptr, nullptr, CFUN_TIMEOUT)) {
+                return -1;
             }
         }
     }
@@ -1879,17 +1882,12 @@ bool MDMParser::registerNet(const char* apn, NetStatus* status, system_tick_t ti
                 }
             }
 
-            // Run network debug information atleast once
-            // FIXME: Add support for R410. For now, this will not break R410s, but will give a bunch of errors
-            if (network_debug() < 0) {
-                goto failure;
-            }
-
-            // Now check every 30 seconds for 10 minutes to see if we're connected to the tower (GSM, GPRS and LTE)
+            // Now check every 15 seconds for 10 minutes to see if we're connected to the tower (GSM, GPRS and LTE)
             system_tick_t start = HAL_Timer_Get_Milli_Seconds();
             system_tick_t start_imsi_check = start;
             system_tick_t reg_intervention_start = start;
             registrationInterventions_ = 0;
+            unsigned registrationInterventionsCnt_ = 0;
             while (!(ok = checkNetStatus(status)) && !TIMEOUT(start, timeout_ms) && !_cancel_all_operations) {
                 system_tick_t start = HAL_Timer_Get_Milli_Seconds();
                 while ((HAL_Timer_Get_Milli_Seconds() - start < 15000UL) && !_cancel_all_operations) {
@@ -1901,15 +1899,17 @@ bool MDMParser::registerNet(const char* apn, NetStatus* status, system_tick_t ti
                 }
 
 #ifdef INTERVENE_REGISTRATION
+                registrationInterventionsCnt_++;
                 // Intervene registration
-                auto registrationInterventionsPrev_ = registrationInterventions_;
-                if (interveneRegistration(reg_intervention_start) < 0) {
-                    goto failure;
-                }
-                if (registrationInterventionsPrev_ != registrationInterventions_) {
-                    reg_intervention_start = HAL_Timer_Get_Milli_Seconds();
+                // MDM_INFO("intervene reg check intr: %u / count: %u", registrationInterventions_, registrationInterventionsCnt_);
+                if (registrationInterventionsCnt_ == registrationInterventions_+1) {
+                    registrationInterventionsCnt_ = 0;
+                    if (interveneRegistration(reg_intervention_start) < 0) {
+                        goto failure;
+                    }
                 }
 #endif
+
                 // Run network debug information
                 // FIXME: Add support for R410. For now, this will not break R410s, but will give a bunch of errors
                 if (network_debug() < 0) {
@@ -1966,6 +1966,12 @@ bool MDMParser::checkNetStatus(NetStatus* status /*= NULL*/)
     if (REG_OK(_net.csd) || REG_OK(_net.psd) || REG_OK(_net.eps)) {
         // get the current operator and radio access technology we are connected to
         if (!_atOk()) {
+            goto failure;
+        }
+
+        // Run network debug information once after registration
+        // FIXME: Add support for R410. For now, this will not break R410s, but will give a bunch of errors
+        if (network_debug() < 0) {
             goto failure;
         }
 
